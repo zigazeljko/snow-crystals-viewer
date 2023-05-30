@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<meta charset="utf-8" />
+
+<style>
+  body {
+    margin: 0;
+    padding: 0;
+  }
+</style>
+
+<canvas id="c" style="display: block"></canvas>
+
+<script>
+  const canvas = document.getElementById("c");
+  const gl = canvas.getContext("webgl2");
+  gl.getExtension("EXT_color_buffer_float");
+
+  const buildShader = (program, type, source) => {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    gl.attachShader(program, shader);
+    return shader;
+  };
+
+  const buildProgram = (vertexSource, fragmentSource) => {
+    const program = gl.createProgram();
+    const vertexShader = buildShader(program, gl.VERTEX_SHADER, vertexSource);
+    const fragmentShader = buildShader(program, gl.FRAGMENT_SHADER, fragmentSource);
+    console.log(gl.getShaderInfoLog(vertexShader));
+    console.log(gl.getShaderInfoLog(fragmentShader));
+    gl.linkProgram(program);
+    gl.detachShader(program, vertexShader);
+    gl.detachShader(program, fragmentShader);
+    gl.deleteShader(vertexShader);
+    gl.deleteShader(fragmentShader);
+    return program;
+  };
+
+  const renderProgram = buildProgram(
+    `#version 300 es
+void main() {
+  gl_Position = vec4((gl_VertexID & 1) != 0 ? 1.0 : -1.0,
+                     (gl_VertexID & 2) != 0 ? 1.0 : -1.0, 0.0, 1.0);
+}`,
+    `#version 300 es
+precision highp int;
+precision highp float;
+precision highp sampler3D;
+uniform vec2 screenSize;
+uniform int frameIndex;
+uniform sampler3D image;
+out vec4 fragColor;
+const vec2 s = vec2(1.7320508, 1);
+vec2 hex(vec2 p) {
+  vec4 hC = floor(vec4(p, p - vec2(1, 0.5)) / s.xyxy) + 0.5;
+  vec4 h = vec4(p - hC.xy * s, p - (hC.zw + 0.5) * s);
+  return dot(h.xy, h.xy) < dot(h.zw, h.zw) ? hC.xy * vec2(2, 1) : hC.zw * vec2(2, 1) + 1.0;
+}
+void main() {
+  vec3 size = vec3(textureSize(image, 0));
+  float scale = max((size.x * s.x * 0.5 + 0.5) / screenSize.x, (size.y + 0.5) / screenSize.y);
+  vec2 u = (gl_FragCoord.xy - screenSize * 0.5) * scale * vec2(1, -1);
+  u += size.xy * s * vec2(0.25, 0.5) + s * vec2(0.25, -0.25);
+  vec2 h = hex(u);
+  float col = (h.x > 0.0 && h.y >= 0.0 && h.x <= size.x && h.y < size.y)
+                  ? texelFetch(image, ivec3(h.x - 1.0, h.y, frameIndex), 0).r
+                  : 0.0;
+  fragColor = vec4(vec3(col), 1);
+}`
+  );
+
+  const screenSizeId = gl.getUniformLocation(renderProgram, "screenSize");
+  const frameIndexId = gl.getUniformLocation(renderProgram, "frameIndex");
+  const imageId = gl.getUniformLocation(renderProgram, "image");
+  const imageTexture = gl.createTexture();
+  gl.disable(gl.BLEND);
+  gl.disable(gl.DEPTH_TEST);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_3D, imageTexture);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.useProgram(renderProgram);
+  gl.uniform1i(imageId, 0);
+
+  let frameIndex = 0;
+  let frameCount = 1;
+  let isPlaying = false;
+
+  const updateTextures = (buffer) => {
+    let length = buffer.byteLength - 4;
+    if (length <= 0) return alert("input file too short");
+    let header = new Uint16Array(buffer, 0, 4);
+    let data = new Uint8Array(buffer, 4);
+    let w = header[0];
+    let h = header[1];
+    let n = length / (w * h);
+    if (n !== n >>> 0) return alert(`wrong input size: ${length} is not divisible by ${w * h}`);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, w, h, n, 0, gl.RED, gl.UNSIGNED_BYTE, data);
+    frameIndex = 0;
+    frameCount = n;
+    isPlaying = false;
+    window.onresize();
+  };
+
+  const resizeTextures = () => {
+    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    gl.uniform2f(screenSizeId, gl.drawingBufferWidth, gl.drawingBufferHeight);
+  };
+
+  let renderRequested = false;
+
+  const render = () => {
+    renderRequested = false;
+    gl.uniform1i(frameIndexId, frameIndex);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    isPlaying = isPlaying && frameIndex + 1 < frameCount;
+    document.title = `frame ${frameIndex + 1} of ${frameCount}`;
+    if (isPlaying) {
+      frameIndex++;
+      window.requestAnimationFrame(render);
+      renderRequested = true;
+    }
+  };
+
+  window.onresize = () => {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    resizeTextures();
+    if (renderRequested) return;
+    window.requestAnimationFrame(render);
+    renderRequested = true;
+  };
+
+  window.onkeydown = (event) => {
+    if (event.keyCode == 37) frameIndex = Math.max(frameIndex - 1, 0);
+    else if (event.keyCode == 39) frameIndex = Math.min(frameIndex + 1, frameCount - 1);
+    else if (event.keyCode == 32) isPlaying = !isPlaying;
+    else return;
+    if (renderRequested) return;
+    window.requestAnimationFrame(render);
+    renderRequested = true;
+  };
+
+  window.ondragover = (event) => {
+    event.preventDefault();
+  };
+
+  window.ondrop = (event) => {
+    event.preventDefault();
+    let file = event.dataTransfer.files[0];
+    if (!file) return;
+    file.arrayBuffer().then(
+      (buffer) => updateTextures(buffer),
+      (err) => alert(err)
+    );
+  };
+
+  window.onresize();
+</script>
